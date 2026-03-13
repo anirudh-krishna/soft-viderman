@@ -5,7 +5,8 @@ import glob
 from read_ccodes import read_ccode
 from decoder import VidermanDecoder
 from experiment import run_experiment
-from plotting import plot_results
+from optimize_h import run_optimize_h
+from plotting import plot_results, plot_optimal_h
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,10 +37,11 @@ def load_codes(n, m):
 
 if __name__ == "__main__":
     # --- Configuration ---
+    mode = "optimize_h"  # "sweep" or "optimize_h"
+
     n = 120
     m = 100
     p_list = [0.01, 0.02, 0.03, 0.04, 0.05]
-    eps_list = [0.05, 0.06, 0.07, 0.08, 0.09, 0.1]
     ci_target = 0.01
 
     # Load codes
@@ -48,11 +50,25 @@ if __name__ == "__main__":
         logger.error("No codes found with n=%d, m=%d.", n, m)
         sys.exit(1)
 
-    # Run experiments
-    all_results = {}
-    for code in codes:
-        decoder = VidermanDecoder(code)
-        result = run_experiment(decoder, code, p_list, eps_list, ci_target=ci_target)
-        all_results[code.id] = result
+    if mode == "sweep":
+        # Sweep over all h values
+        dv = codes[0].dv
+        h_list = list(range(dv + 1))
 
-    plot_results(all_results, p_list)
+        all_results = {}
+        for code in codes:
+            decoder = VidermanDecoder(code)
+            result = run_experiment(decoder, code, p_list, h_list, ci_target=ci_target)
+            all_results[code.id] = result
+
+        plot_results(all_results, p_list)
+
+    elif mode == "optimize_h":
+        # Find optimal h for each p
+        all_optimal = {}
+        for code in codes:
+            decoder = VidermanDecoder(code)
+            result = run_optimize_h(decoder, code, p_list, ci_target=ci_target)
+            all_optimal[code.id] = result
+
+        plot_optimal_h(all_optimal)

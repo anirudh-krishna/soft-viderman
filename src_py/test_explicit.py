@@ -5,18 +5,17 @@ from utils import compute_synd
 from main import load_codes
 
 
-def walk_through_decode(code, p=0.03, eps=0.07, seed=42):
+def walk_through_decode(code, p, h, seed=42):
     """
     Generate a single error sample and walk through every step of
     Viderman's decoding algorithm, printing intermediate state.
     """
     np.random.seed(seed)
     decoder = VidermanDecoder(code)
-    h = (1.0 - 2.0 * eps) * code.dv
 
     print("=" * 70)
     print(f"Code: {code.id}  n={code.n}  m={code.m}  dv={code.dv}  dc={code.dc}")
-    print(f"eps={eps}  h={h:.4f}")
+    print(f"h={h}")
     print("=" * 70)
 
     # --- Generate error ---
@@ -30,7 +29,7 @@ def walk_through_decode(code, p=0.03, eps=0.07, seed=42):
     print(f"Syndrome: weight={len(unsatisfied)}, unsatisfied checks={sorted(unsatisfied)}")
 
     # --- find step ---
-    print(f"\n--- find(eps={eps}, h={h:.4f}) ---")
+    print(f"\n--- find(h={h}) ---")
     R = set(unsatisfied)
     L = set()
     iteration = 0
@@ -163,4 +162,4 @@ if __name__ == "__main__":
     if not codes:
         print("No codes found")
     else:
-        walk_through_decode(codes[0], p=0.03, eps=0.15, seed=42)
+        walk_through_decode(codes[0], p=0.065, h=4, seed=42)

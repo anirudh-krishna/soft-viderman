@@ -129,18 +129,17 @@ class VidermanDecoder(Decoder):
 
     label = "viderman"
 
-    def find(self, syndrome, eps):
+    def find(self, syndrome, h):
         """
         Identify suspect variable nodes via Viderman's greedy expansion.
 
         Args:
             syndrome: np.array of length m, binary (0/1)
-            eps: small parameter; threshold h = (1 - 2*eps) * dv
+            h: integer threshold; add v to L if |N(v) ∩ R| >= h
 
         Returns:
             (L, R) where L is a set of variable indices, R is a set of check indices
         """
-        h = (1.0 - 2.0 * eps) * self.dv
         R = set(np.where(syndrome == 1)[0])
         L = set()
 
@@ -157,21 +156,21 @@ class VidermanDecoder(Decoder):
                     R.update(nbhd)
                     changed = True
 
-        logger.debug("find: |L|=%d, |R|=%d, h=%.2f, eps=%.4f", len(L), len(R), h, eps)
+        logger.debug("find: |L|=%d, |R|=%d, h=%d", len(L), len(R), h)
         return L, R
 
-    def decode(self, syndrome, eps):
+    def decode(self, syndrome, h):
         """
         Full Viderman decoding: find suspect set, early-fail check, then erasure recovery.
 
         Args:
             syndrome: np.array of length m, binary (0/1)
-            eps: small parameter for the threshold in find
+            h: integer threshold for find
 
         Returns:
             True if decoding succeeded, False otherwise.
         """
-        L, R = self.find(syndrome, eps)
+        L, R = self.find(syndrome, h)
 
         # Early fail: any unsatisfied check outside R means the error is not contained
         unsatisfied = set(np.where(syndrome == 1)[0])

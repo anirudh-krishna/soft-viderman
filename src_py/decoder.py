@@ -199,12 +199,13 @@ class BitFlipDecoder(Decoder):
 
     label = "bitflip"
 
-    def decode(self, syndrome, max_iters=None):
+    def decode(self, syndrome, p=None, max_iters=None):
         """
         Decode by iterative bit-flipping.
 
         Args:
             syndrome: np.array of length m, binary (0/1)
+            p: unused (accepted for interface compatibility)
             max_iters: maximum number of flip iterations (default: n)
 
         Returns:
@@ -249,4 +250,291 @@ class BitFlipDecoder(Decoder):
 
         converged = not np.any(synd)
         logger.debug("bitflip decode: converged=%s, flips=%d", converged, np.sum(e_deduced))
+        return e_deduced, converged
+
+
+class SoftBitFlipDecoder(Decoder):
+    """
+    Soft bit-flipping decoder using channel log-likelihood ratio.
+
+    Flip metric for variable v:
+        E_v = -b_v * (1 - 2*x_v) + sum_{c in N(v)} (2*s_c - 1)
+    where b_v = log((1-p)/p) and x_v in {0,1} is the current error estimate.
+
+    Flips the variable with the largest E_v, provided E_v > 0.
+    """
+
+    label = "soft_bitflip"
+
+    def decode(self, syndrome, p=None, alpha=1.0, max_iters=None):
+        """
+        Decode by soft iterative bit-flipping.
+
+        E_v = -b * (1 - 2*x_v) + alpha * sum_{c in N(v)} (2*s_c - 1)
+
+        Args:
+            syndrome: np.array of length m, binary (0/1)
+            p: channel error probability (used to compute LLR prior)
+            alpha: weight for syndrome evidence relative to prior
+            max_iters: maximum number of flip iterations (default: n)
+
+        Returns:
+            (e_deduced, converged) where e_deduced is np.array of length n
+            and converged is True if the syndrome was fully cleared.
+        """
+        if max_iters is None:
+            max_iters = self.n
+
+        b = np.log((1 - p) / p)  # channel LLR
+
+        synd = syndrome.copy()
+        e_deduced = np.zeros(self.n, dtype=int)
+
+        # Compute initial syndrome contribution for each variable:
+        # synd_score[v] = sum_{c in N(v)} (2*s_c - 1)
+        synd_score = np.zeros(self.n, dtype=float)
+        for v in range(self.n):
+            for c in self.bit_nbhd[v]:
+                synd_score[v] += 2 * synd[c] - 1
+
+        # E_v = -b * (1 - 2*x_v) + alpha * synd_score[v]
+        # Initially all x_v = 0, so (1 - 2*x_v) = 1, prior term = -b
+        E = -b + alpha * synd_score
+
+        for _ in range(max_iters):
+            v = np.argmax(E)
+            if E[v] <= 0:
+                break
+
+            # Flip variable v
+            e_deduced[v] ^= 1
+            # Prior term for v flips sign: toggles by 2*b
+            if e_deduced[v] == 1:
+                E[v] += 2 * b
+            else:
+                E[v] -= 2 * b
+
+            # Update syndrome and scores for affected neighbors
+            for c in self.bit_nbhd[v]:
+                if synd[c] == 1:
+                    # Check becomes satisfied: (2*s_c - 1) changes from +1 to -1, delta = -2
+                    synd[c] = 0
+                    for u in self.check_nbhd[c]:
+                        synd_score[u] -= 2
+                        E[u] -= 2 * alpha
+                else:
+                    # Check becomes unsatisfied: (2*s_c - 1) changes from -1 to +1, delta = +2
+                    synd[c] = 1
+                    for u in self.check_nbhd[c]:
+                        synd_score[u] += 2
+                        E[u] += 2 * alpha
+
+        converged = not np.any(synd)
+        logger.debug("soft_bitflip decode: converged=%s, flips=%d, alpha=%.3f",
+                     converged, np.sum(e_deduced), alpha)
+        return e_deduced, converged
+
+
+class MinSumBPDecoder(Decoder):
+    """
+    Min-sum belief propagation decoder for LDPC codes (syndrome-based).
+
+    Messages are LLRs. Positive = likely no error, negative = likely error.
+    Check-to-variable uses the min-sum approximation.
+
+    All messages stored in flat arrays indexed by edge number, with
+    precomputed index arrays for vectorized gather/scatter.
+    """
+
+    def __init__(self, code, max_iters=50):
+        super().__init__(code)
+        self.max_iters = max_iters
+        self.label = f"minsum_bp_i{max_iters}"
+
+        # Total number of edges = n * dv = m * dc
+        self.n_edges = self.n * self.dv
+
+        # Edge layout: edges 0..dv-1 belong to variable 0, dv..2*dv-1 to variable 1, etc.
+        # edge_var[e] = variable of edge e
+        # edge_check[e] = check of edge e
+        edge_var = np.empty(self.n_edges, dtype=int)
+        edge_check = np.empty(self.n_edges, dtype=int)
+        for v in range(self.n):
+            for i, c in enumerate(self.bit_nbhd[v]):
+                e = v * self.dv + i
+                edge_var[e] = v
+                edge_check[e] = c
+        self.edge_var = edge_var
+        self.edge_check = edge_check
+
+        # For each edge e (indexed by variable), find the corresponding edge index
+        # when indexed by check. We need this to map between the two views.
+        # check_edges[c] = list of edge indices (in the variable-indexed flat array)
+        #                   for check c, in the order of check_nbhd[c]
+        check_edges = [[] for _ in range(self.m)]
+        for v in range(self.n):
+            for i, c in enumerate(self.bit_nbhd[v]):
+                check_edges[c].append(v * self.dv + i)
+
+        # Reorder so check_edges[c][j] corresponds to check_nbhd[c][j]
+        check_edges_ordered = []
+        for c in range(self.m):
+            edge_map = {}
+            for e in check_edges[c]:
+                edge_map[edge_var[e]] = e
+            check_edges_ordered.append([edge_map[v] for v in self.check_nbhd[c]])
+
+        # c_edges: shape (m, dc) — edge indices grouped by check
+        self.c_edges = np.array(check_edges_ordered, dtype=int)
+
+        # v_edges: shape (n, dv) — edge indices grouped by variable
+        self.v_edges = np.arange(self.n_edges, dtype=int).reshape(self.n, self.dv)
+
+    def decode(self, syndrome, p=None, max_iters=None):
+        """
+        Decode by min-sum belief propagation (vectorized).
+
+        Args:
+            syndrome: np.array of length m, binary (0/1)
+            p: channel error probability
+            max_iters: override for self.max_iters if provided
+
+        Returns:
+            (e_deduced, converged) where e_deduced is np.array of length n
+            and converged is True if the syndrome was fully cleared.
+        """
+        if max_iters is None:
+            max_iters = self.max_iters
+
+        L = np.log((1 - p) / p)
+
+        # Messages stored in flat arrays of length n_edges
+        msg_vc = np.full(self.n_edges, L)  # variable-to-check
+        msg_cv = np.zeros(self.n_edges)    # check-to-variable
+
+        # Syndrome sign: (-1)^{s_c} for each check
+        synd_sign = 1 - 2 * syndrome  # shape (m,)
+
+        prev_decision = np.zeros(self.n, dtype=int)
+
+        for iteration in range(max_iters):
+            # --- Check-to-variable update ---
+            # Gather incoming v->c messages for each check: shape (m, dc)
+            incoming = msg_vc[self.c_edges]
+
+            signs = np.sign(incoming)
+            signs[signs == 0] = 1  # treat zero as positive
+            mags = np.abs(incoming)
+
+            # Product of all signs per check, adjusted by syndrome
+            sign_prod = synd_sign * np.prod(signs, axis=1)  # shape (m,)
+
+            # Min and second-min per check row
+            sorted_mags = np.sort(mags, axis=1)
+            min1 = sorted_mags[:, 0]  # shape (m,)
+            min2 = sorted_mags[:, 1]  # shape (m,)
+
+            # For each edge in check c: excl_sign = sign_prod[c] * sign[j] (undoes j's contribution)
+            # excl_min = min1 if this edge is not the argmin, else min2
+            argmin_mask = (mags == min1[:, None])
+            # If multiple edges tie for min, only exclude the first one
+            first_argmin = np.zeros_like(argmin_mask)
+            first_argmin[np.arange(self.m), np.argmax(argmin_mask, axis=1)] = True
+
+            excl_min = np.where(first_argmin, min2[:, None], min1[:, None])
+            excl_sign = sign_prod[:, None] * signs
+
+            outgoing_cv = excl_sign * excl_min  # shape (m, dc)
+
+            # Scatter back to flat msg_cv array
+            np.put(msg_cv, self.c_edges.ravel(), outgoing_cv.ravel())
+
+            # --- Variable-to-check update ---
+            # Gather incoming c->v messages for each variable: shape (n, dv)
+            incoming_cv = msg_cv[self.v_edges]
+            incoming_sum = np.sum(incoming_cv, axis=1)  # shape (n,)
+
+            # Outgoing: L + sum of all incoming except the target
+            msg_vc[self.v_edges] = L + incoming_sum[:, None] - incoming_cv
+
+            # --- Hard decision ---
+            belief = L + incoming_sum  # shape (n,)
+            e_deduced = (belief < 0).astype(int)
+
+            # Early stop if decisions stabilized
+            if np.array_equal(e_deduced, prev_decision) and iteration > 0:
+                break
+            prev_decision = e_deduced.copy()
+
+        converged = self.verify_syndrome(e_deduced, syndrome)
+        logger.debug("minsum_bp decode: converged=%s, iters=%d, weight=%d",
+                     converged, iteration + 1, np.sum(e_deduced))
+        return e_deduced, converged
+
+
+class BPFlipDecoder(Decoder):
+    """
+    Hybrid decoder: run min-sum BP, then clean up residual syndrome with hard bit-flip.
+    """
+
+    def __init__(self, code, bp_iters=50, flip_max_iters=None):
+        super().__init__(code)
+        self.bp_iters = bp_iters
+        self.flip_max_iters = flip_max_iters if flip_max_iters is not None else code.n
+        self.label = f"bp{bp_iters}_flip"
+        self.bp_decoder = MinSumBPDecoder(code, max_iters=bp_iters)
+
+    def decode(self, syndrome, p=None, max_iters=None):
+        """
+        Decode by running BP then hard bit-flip on the residual syndrome.
+
+        Args:
+            syndrome: np.array of length m, binary (0/1)
+            p: channel error probability
+            max_iters: unused (accepted for interface compatibility)
+
+        Returns:
+            (e_deduced, converged) where e_deduced is np.array of length n
+            and converged is True if the syndrome was fully cleared.
+        """
+        # Phase 1: BP
+        e_deduced, converged = self.bp_decoder.decode(syndrome, p=p)
+        if converged:
+            return e_deduced, True
+
+        # Phase 2: compute residual syndrome and run hard bit-flip
+        residual_synd = np.zeros(self.m, dtype=int)
+        for c in range(self.m):
+            residual_synd[c] = (syndrome[c] + np.sum(e_deduced[self.check_nbhd[c]])) % 2
+
+        # Initialize unsat_count from residual syndrome
+        unsat_count = np.zeros(self.n, dtype=int)
+        for v in range(self.n):
+            for c in self.bit_nbhd[v]:
+                if residual_synd[c] == 1:
+                    unsat_count[v] += 1
+
+        threshold = self.dv // 2 + 1
+
+        for _ in range(self.flip_max_iters):
+            v = np.argmax(unsat_count)
+            if unsat_count[v] < threshold:
+                break
+
+            # Flip variable v
+            e_deduced[v] ^= 1
+
+            # Update residual syndrome and unsat_count
+            for c in self.bit_nbhd[v]:
+                if residual_synd[c] == 1:
+                    residual_synd[c] = 0
+                    for u in self.check_nbhd[c]:
+                        unsat_count[u] -= 1
+                else:
+                    residual_synd[c] = 1
+                    for u in self.check_nbhd[c]:
+                        unsat_count[u] += 1
+
+        converged = not np.any(residual_synd)
+        logger.debug("bp_flip decode: converged=%s, weight=%d", converged, np.sum(e_deduced))
         return e_deduced, converged

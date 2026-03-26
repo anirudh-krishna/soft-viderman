@@ -3,10 +3,12 @@ import os
 import sys
 import glob
 from read_ccodes import read_ccode
-from decoder import VidermanDecoder, BitFlipDecoder
-from experiment import run_experiment, run_experiment_bitflip
+from decoder import VidermanDecoder, BitFlipDecoder, SoftBitFlipDecoder, MinSumBPDecoder, BPFlipDecoder
+from experiment import (run_experiment, run_experiment_bitflip,
+                       run_experiment_soft_bitflip, run_experiment_compare)
 from optimize_h import run_optimize_h
-from plotting import plot_results, plot_optimal_h, plot_bitflip_results
+from plotting import (plot_results, plot_optimal_h, plot_bitflip_results,
+                      plot_soft_bitflip_results, plot_compare_results)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -39,7 +41,10 @@ def load_codes(nm_list):
 
 if __name__ == "__main__":
     # --- Configuration ---
-    mode = "bitflip"  # "sweep", "optimize_h", or "bitflip"
+    # mode: "sweep", "optimize_h", "bitflip", "soft_bitflip", "minsum_bp",
+    #       or "compare" (set compare_decoders below)
+    mode = "compare"
+    compare_decoders = ["minsum_bp_50", "bitflip", "minsum_bp_200", "bp50_flip"]
 
     nm_list = [(120, 100),(240,200)]
     p_list = [0.01, 0.02, 0.03, 0.04, 0.05]
@@ -51,11 +56,59 @@ if __name__ == "__main__":
         logger.error("No codes found for nm_list=%s.", nm_list)
         sys.exit(1)
 
-    if mode == "bitflip":
+    DECODER_MAP = {
+        "bitflip": lambda code: BitFlipDecoder(code),
+        "minsum_bp_50": lambda code: MinSumBPDecoder(code, max_iters=50),
+        "minsum_bp_100": lambda code: MinSumBPDecoder(code, max_iters=100),
+        "minsum_bp_200": lambda code: MinSumBPDecoder(code, max_iters=200),
+        "bp50_flip": lambda code: BPFlipDecoder(code, bp_iters=50),
+        "bp100_flip": lambda code: BPFlipDecoder(code, bp_iters=100),
+    }
+
+    if mode == "compare":
+        # All decoders see the same error samples per code
+        all_results_by_algo = {}
+        for code in codes:
+            decoder_list = [DECODER_MAP[name](code) for name in compare_decoders]
+            code_results = run_experiment_compare(decoder_list, code, p_list,
+                                                  ci_target=ci_target)
+            for label, result in code_results.items():
+                if label not in all_results_by_algo:
+                    all_results_by_algo[label] = {}
+                all_results_by_algo[label][code.id] = result
+
+        plot_compare_results(all_results_by_algo)
+
+    elif mode == "bitflip":
         # Bit-flip decoder: no h parameter
         all_results = {}
         for code in codes:
             decoder = BitFlipDecoder(code)
+            result = run_experiment_bitflip(decoder, code, p_list, ci_target=ci_target)
+            all_results[code.id] = result
+
+        plot_bitflip_results(all_results)
+
+    elif mode == "soft_bitflip":
+        # Soft bit-flip decoder: coarse sweep over alpha values
+        import numpy as np
+        alpha_list = list(np.linspace(0.5, 3.0, 11))
+
+        all_results = {}
+        for code in codes:
+            decoder = SoftBitFlipDecoder(code)
+            result = run_experiment_soft_bitflip(decoder, code, p_list, alpha_list,
+                                                ci_target=0.1, min_samples=100,
+                                                max_samples=5000)
+            all_results[code.id] = result
+
+        plot_soft_bitflip_results(all_results)
+
+    elif mode == "minsum_bp":
+        # Min-sum BP decoder
+        all_results = {}
+        for code in codes:
+            decoder = MinSumBPDecoder(code, max_iters = 200)
             result = run_experiment_bitflip(decoder, code, p_list, ci_target=ci_target)
             all_results[code.id] = result
 

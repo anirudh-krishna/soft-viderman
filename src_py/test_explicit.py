@@ -1,6 +1,6 @@
 import numpy as np
 from read_ccodes import read_ccode
-from decoder import VidermanDecoder, BitFlipDecoder
+from decoder import VidermanDecoder, BitFlipDecoder, SoftBitFlipDecoder
 from utils import compute_synd
 from main import load_codes
 
@@ -257,8 +257,158 @@ def walk_through_bitflip(code, p, seed=42):
         print(f"\nDecode result: SUCCESS")
 
 
+def walk_through_soft_bitflip(code, p, seed=42):
+    """
+    Generate a single error sample and walk through every step of
+    the soft bit-flip decoding algorithm, printing intermediate state.
+    """
+    np.random.seed(seed)
+    decoder = SoftBitFlipDecoder(code)
+    b = np.log((1 - p) / p)
+
+    print("=" * 70)
+    print(f"Code: {code.id}  n={code.n}  m={code.m}  dv={code.dv}  dc={code.dc}")
+    print(f"Soft bit-flip: p={p}, b=log((1-p)/p)={b:.4f}")
+    print(f"E_v = -b*(1-2*x_v) + sum_{{c in N(v)}} (2*s_c - 1)")
+    print("=" * 70)
+
+    # --- Generate error ---
+    err = (np.random.random(code.n) < p).astype(int)
+    error_support = set(np.where(err == 1)[0])
+    print(f"\nError: weight={len(error_support)}, support={sorted(error_support)}")
+
+    # --- Compute syndrome ---
+    syndrome = compute_synd(code, err)
+    unsatisfied = set(np.where(syndrome == 1)[0])
+    print(f"Syndrome: weight={len(unsatisfied)}, unsatisfied checks={sorted(unsatisfied)}")
+
+    # --- Initialize ---
+    synd = syndrome.copy()
+    e_deduced = np.zeros(code.n, dtype=int)
+    synd_score = np.zeros(code.n, dtype=float)
+    for v in range(code.n):
+        for c in code.bit_nbhd[v]:
+            synd_score[v] += 2 * synd[c] - 1
+    E = -b + synd_score.copy()
+
+    # --- Diagnostic: E_v breakdown for error bits vs clean bits ---
+    error_mask = np.array([v in error_support for v in range(code.n)])
+    clean_mask = ~error_mask
+
+    print(f"\n--- Initial E_v diagnostics ---")
+    print(f"  Prior term: -b = {-b:.4f}  (variable must have synd_score > {b:.4f} to be flippable)")
+    print(f"  Hard threshold for comparison: unsat_count >= {code.dv // 2 + 1} "
+          f"(synd_score >= {2 * (code.dv // 2 + 1) - code.dv})")
+    print(f"  Max possible synd_score: {code.dv} (all {code.dv} neighbors unsatisfied)")
+
+    print(f"\n  Error bits ({len(error_support)}):")
+    for v in sorted(error_support):
+        unsat = sum(1 for c in code.bit_nbhd[v] if synd[c] == 1)
+        print(f"    v={v:3d}: synd_score={synd_score[v]:+.1f} "
+              f"(unsat={unsat}/{code.dv}), "
+              f"prior={-b:.4f}, E_v={E[v]:+.4f} "
+              f"{'FLIPPABLE' if E[v] > 0 else ''}")
+
+    print(f"\n  Clean bits (top 10 by E_v):")
+    clean_indices = np.where(clean_mask)[0]
+    top_clean = clean_indices[np.argsort(E[clean_indices])[::-1][:10]]
+    for v in top_clean:
+        unsat = sum(1 for c in code.bit_nbhd[v] if synd[c] == 1)
+        print(f"    v={v:3d}: synd_score={synd_score[v]:+.1f} "
+              f"(unsat={unsat}/{code.dv}), "
+              f"prior={-b:.4f}, E_v={E[v]:+.4f} "
+              f"{'FLIPPABLE' if E[v] > 0 else ''}")
+
+    print(f"\n  Summary: E_v > 0 among error bits: {np.sum(E[error_mask] > 0)}/{len(error_support)}, "
+          f"among clean bits: {np.sum(E[clean_mask] > 0)}/{np.sum(clean_mask)}")
+
+    # --- Iterative flipping ---
+    print(f"\n--- Soft bit-flip iterations ---")
+    max_iters = code.n
+
+    for iteration in range(1, max_iters + 1):
+        v = np.argmax(E)
+        if E[v] <= 0:
+            # Show what the top candidates look like at stopping
+            print(f"\n  No flippable variable found (max E={E[v]:.4f}). Stopping.")
+            top5 = np.argsort(E)[::-1][:5]
+            print(f"  Top 5 candidates at stop:")
+            for rank, u in enumerate(top5):
+                in_err = "in error" if u in error_support else "clean"
+                unsat = sum(1 for c in code.bit_nbhd[u] if synd[c] == 1)
+                prior = -b * (1 - 2 * e_deduced[u])
+                print(f"    #{rank+1} v={u:3d} ({in_err}): E_v={E[u]:+.4f}, "
+                      f"synd_score={synd_score[u]:+.1f} (unsat={unsat}/{code.dv}), "
+                      f"prior={prior:+.4f}, x_v={e_deduced[u]}")
+            break
+
+        in_error = "in error" if v in error_support else "clean"
+        currently_flipped = "unflip" if e_deduced[v] == 1 else "flip"
+
+        if iteration <= 30:
+            prior = -b * (1 - 2 * e_deduced[v])
+            print(f"  iter {iteration}: {currently_flipped} v={v} ({in_error}), "
+                  f"E_v={E[v]:.4f}, synd_score={synd_score[v]:.1f}, "
+                  f"prior={prior:+.4f}, x_v={e_deduced[v]}")
+
+        # Flip
+        e_deduced[v] ^= 1
+        if e_deduced[v] == 1:
+            E[v] += 2 * b
+        else:
+            E[v] -= 2 * b
+
+        for c in code.bit_nbhd[v]:
+            if synd[c] == 1:
+                synd[c] = 0
+                for u in code.check_nbhd[c]:
+                    synd_score[u] -= 2
+                    E[u] -= 2
+            else:
+                synd[c] = 1
+                for u in code.check_nbhd[c]:
+                    synd_score[u] += 2
+                    E[u] += 2
+
+        remaining_syndrome = int(np.sum(synd))
+        if iteration <= 30:
+            # Show how many error vs clean bits are now flippable
+            err_flippable = np.sum(E[error_mask] > 0)
+            clean_flippable = np.sum(E[clean_mask] > 0)
+            print(f"         remaining syndrome weight={remaining_syndrome}, "
+                  f"max E={np.max(E):.4f}, "
+                  f"flippable: {err_flippable} error + {clean_flippable} clean")
+        elif iteration == 31:
+            print(f"  ... (suppressing further iterations)")
+
+    # --- Result ---
+    converged = not np.any(synd)
+    flipped_support = set(np.where(e_deduced == 1)[0])
+
+    print(f"\n--- Result after {iteration} iterations ---")
+    print(f"  Converged (syndrome cleared): {converged}")
+    print(f"  Flipped bits: weight={len(flipped_support)}, support={sorted(flipped_support)}")
+    print(f"  Actual error: weight={len(error_support)}, support={sorted(error_support)}")
+
+    if not converged:
+        remaining = set(np.where(synd == 1)[0])
+        print(f"  Remaining syndrome weight: {len(remaining)}")
+        print(f"\nDecode result: FAIL (syndrome not cleared)")
+        return
+
+    residual = (err + e_deduced) % 2
+    residual_support = set(np.where(residual == 1)[0])
+    if np.any(residual):
+        print(f"  Residual (e + e_deduced) mod 2: weight={len(residual_support)}, "
+              f"support={sorted(residual_support)}")
+        print(f"\nDecode result: LOGICAL ERROR")
+    else:
+        print(f"  e_deduced == e? True")
+        print(f"\nDecode result: SUCCESS")
+
+
 if __name__ == "__main__":
-    mode = "bitflip"
+    mode = "soft_bitflip"
     codes = load_codes([(120, 100)])
     if not codes:
         print("No codes found")
@@ -268,4 +418,7 @@ if __name__ == "__main__":
             walk_through_decode(codes[0], p=0.065, h=4, seed=42)
         elif mode == "bitflip":
             print("\n\n===== BIT-FLIP DECODER =====\n")
-            walk_through_bitflip(codes[0], p=0.03, seed=42)
+            walk_through_bitflip(codes[0], p=0.05, seed=42)
+        elif mode == "soft_bitflip":
+            print("\n\n===== SOFT BIT-FLIP DECODER =====\n")
+            walk_through_soft_bitflip(codes[0], p=0.03, seed=42)

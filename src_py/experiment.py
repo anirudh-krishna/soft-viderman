@@ -25,7 +25,7 @@ def load_existing_results(code_id):
 
 
 def run_experiment(decoder, code, p_list, h_list, ci_target=0.01, batch_size=100,
-                   min_samples=200, max_samples=5000):
+                   min_samples=200, max_samples=10000):
     """
     Run decoding experiments with adaptive sampling for a single decoder and code.
     Merges with existing data: accumulates n_samples and n_failures across runs.
@@ -152,7 +152,7 @@ def run_experiment(decoder, code, p_list, h_list, ci_target=0.01, batch_size=100
 
 
 def run_experiment_bitflip(decoder, code, p_list, ci_target=0.01, batch_size=100,
-                           min_samples=200, max_samples=5000):
+                           min_samples=200, max_samples=10000):
     """
     Run bit-flip decoding experiments with adaptive sampling.
     Tracks decode failures (nonzero syndrome) and logical errors (wrong codeword) separately.
@@ -282,7 +282,7 @@ def run_experiment_bitflip(decoder, code, p_list, ci_target=0.01, batch_size=100
 
 
 def run_experiment_soft_bitflip(decoder, code, p_list, alpha_list, ci_target=0.01,
-                                batch_size=100, min_samples=200, max_samples=5000):
+                                batch_size=100, min_samples=200, max_samples=10000):
     """
     Run soft bit-flip decoding experiments sweeping over (p, alpha) pairs.
     Tracks decode failures and logical errors separately.
@@ -414,7 +414,7 @@ def run_experiment_soft_bitflip(decoder, code, p_list, alpha_list, ci_target=0.0
 
 
 def run_experiment_compare(decoders, code, p_list, ci_target=0.01, batch_size=100,
-                           min_samples=200, max_samples=5000):
+                           min_samples=200, max_samples=10000):
     """
     Run multiple decoders on the same error samples for fair comparison.
     All decoders see identical errors at each (p, sample_index).

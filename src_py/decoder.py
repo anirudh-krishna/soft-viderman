@@ -472,17 +472,99 @@ class MinSumBPDecoder(Decoder):
         return e_deduced, converged
 
 
+class SumProductBPDecoder(MinSumBPDecoder):
+    """
+    Sum-product belief propagation decoder for LDPC codes (syndrome-based).
+
+    Uses the exact check-to-variable update:
+        m_{c->v} = (-1)^{s_c} * 2 * atanh(prod_{u in N(c)\\v} tanh(m_{u->c} / 2))
+    """
+
+    def __init__(self, code, max_iters=50):
+        super().__init__(code, max_iters=max_iters)
+        self.label = f"sumproduct_bp_i{max_iters}"
+
+    def decode(self, syndrome, p=None, max_iters=None):
+        """
+        Decode by sum-product belief propagation (vectorized).
+
+        Args:
+            syndrome: np.array of length m, binary (0/1)
+            p: channel error probability
+            max_iters: override for self.max_iters if provided
+
+        Returns:
+            (e_deduced, converged) where e_deduced is np.array of length n
+            and converged is True if the syndrome was fully cleared.
+        """
+        if max_iters is None:
+            max_iters = self.max_iters
+
+        L = np.log((1 - p) / p)
+
+        msg_vc = np.full(self.n_edges, L)
+        msg_cv = np.zeros(self.n_edges)
+
+        synd_sign = 1 - 2 * syndrome  # shape (m,)
+
+        prev_decision = np.zeros(self.n, dtype=int)
+
+        for iteration in range(max_iters):
+            # --- Check-to-variable update (sum-product) ---
+            # Gather incoming v->c messages for each check: shape (m, dc)
+            incoming = msg_vc[self.c_edges]
+
+            # tanh(m/2), clamped to avoid atanh(±1) = ±inf
+            tanh_half = np.tanh(incoming / 2)
+            tanh_half = np.clip(tanh_half, -1 + 1e-15, 1 - 1e-15)
+
+            # Product of all tanh values per check
+            tanh_prod = np.prod(tanh_half, axis=1)  # shape (m,)
+
+            # For each edge j: exclude j by dividing out tanh_half[j]
+            # tanh_half can be zero, so guard against division by zero
+            with np.errstate(divide='ignore', invalid='ignore'):
+                excl_prod = tanh_prod[:, None] / tanh_half  # shape (m, dc)
+            excl_prod = np.clip(excl_prod, -1 + 1e-15, 1 - 1e-15)
+
+            # m_{c->v} = (-1)^{s_c} * 2 * atanh(excl_prod)
+            outgoing_cv = synd_sign[:, None] * 2 * np.arctanh(excl_prod)
+
+            # Scatter back to flat msg_cv array
+            np.put(msg_cv, self.c_edges.ravel(), outgoing_cv.ravel())
+
+            # --- Variable-to-check update (same as min-sum) ---
+            incoming_cv = msg_cv[self.v_edges]
+            incoming_sum = np.sum(incoming_cv, axis=1)
+
+            msg_vc[self.v_edges] = L + incoming_sum[:, None] - incoming_cv
+
+            # --- Hard decision ---
+            belief = L + incoming_sum
+            e_deduced = (belief < 0).astype(int)
+
+            if np.array_equal(e_deduced, prev_decision) and iteration > 0:
+                break
+            prev_decision = e_deduced.copy()
+
+        converged = self.verify_syndrome(e_deduced, syndrome)
+        logger.debug("sumproduct_bp decode: converged=%s, iters=%d, weight=%d",
+                     converged, iteration + 1, np.sum(e_deduced))
+        return e_deduced, converged
+
+
 class BPFlipDecoder(Decoder):
     """
     Hybrid decoder: run min-sum BP, then clean up residual syndrome with hard bit-flip.
     """
 
-    def __init__(self, code, bp_iters=50, flip_max_iters=None):
+    def __init__(self, code, bp_iters=50, flip_max_iters=None, bp_class=MinSumBPDecoder):
         super().__init__(code)
         self.bp_iters = bp_iters
         self.flip_max_iters = flip_max_iters if flip_max_iters is not None else code.n
-        self.label = f"bp{bp_iters}_flip"
-        self.bp_decoder = MinSumBPDecoder(code, max_iters=bp_iters)
+        self.bp_decoder = bp_class(code, max_iters=bp_iters)
+        bp_name = "bp" if bp_class is MinSumBPDecoder else "sp"
+        self.label = f"{bp_name}{bp_iters}_flip"
 
     def decode(self, syndrome, p=None, max_iters=None):
         """

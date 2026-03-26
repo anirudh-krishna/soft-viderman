@@ -46,7 +46,7 @@ if __name__ == "__main__":
     #       or "compare" (set compare_decoders below)
     mode = "compare"
     #compare_decoders = ["bitflip", "sumproduct_bp_50", "sp50_flip"]
-    compare_decoders = ["bitflip", "sumproduct_bp_25", "sp25_flip"]
+    compare_decoders = ["bitflip", "sumproduct_bp_25", "sp25_flip", "sumproduct_bp_100"]
 
     nm_list = [(120, 100),(240,200)]
     p_list = [0.04, 0.05, 0.06, 0.07]
@@ -65,6 +65,7 @@ if __name__ == "__main__":
         "minsum_bp_200": lambda code: MinSumBPDecoder(code, max_iters=200),
         "sumproduct_bp_25": lambda code: SumProductBPDecoder(code, max_iters=25),
         "sumproduct_bp_50": lambda code: SumProductBPDecoder(code, max_iters=50),
+        "sumproduct_bp_100": lambda code: SumProductBPDecoder(code, max_iters=100),
         "sumproduct_bp_200": lambda code: SumProductBPDecoder(code, max_iters=200),
         "sp25_flip": lambda code: BPFlipDecoder(code, bp_iters=25, bp_class=SumProductBPDecoder),
         "sp50_flip": lambda code: BPFlipDecoder(code, bp_iters=50, bp_class=SumProductBPDecoder),

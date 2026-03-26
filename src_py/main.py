@@ -3,25 +3,24 @@ import os
 import sys
 import glob
 from read_ccodes import read_ccode
-from decoder import VidermanDecoder
-from experiment import run_experiment
+from decoder import VidermanDecoder, BitFlipDecoder
+from experiment import run_experiment, run_experiment_bitflip
 from optimize_h import run_optimize_h
-from plotting import plot_results, plot_optimal_h
+from plotting import plot_results, plot_optimal_h, plot_bitflip_results
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def load_codes(n, m):
+def load_codes(nm_list):
     """
-    Scan ccode/swac_* files and return all Classical_code instances matching the given n and m.
+    Scan ccode/swac_* files and return all Classical_code instances matching any (n, m) pair.
 
     Args:
-        n: number of variable nodes (bits)
-        m: number of check nodes
+        nm_list: list of (n, m) tuples
 
     Returns:
-        list of Classical_code instances with code.n == n and code.m == m
+        list of Classical_code instances
     """
     ccode_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ccode")
     pattern = os.path.join(ccode_dir, "swac_*.code")
@@ -29,28 +28,40 @@ def load_codes(n, m):
     if not file_list:
         logger.warning("No swac_*.code files found in %s", ccode_dir)
         return []
-    codes = read_ccode(file_list, [n], [m], [], [], [])
-    logger.info("load_codes(n=%d, m=%d): found %d matching code(s) from %d files",
-                n, m, len(codes), len(file_list))
+    codes = []
+    for n, m in nm_list:
+        found = read_ccode(file_list, [n], [m], [], [], [])
+        logger.info("load_codes(n=%d, m=%d): found %d matching code(s) from %d files",
+                    n, m, len(found), len(file_list))
+        codes.extend(found)
     return codes
 
 
 if __name__ == "__main__":
     # --- Configuration ---
-    mode = "optimize_h"  # "sweep" or "optimize_h"
+    mode = "bitflip"  # "sweep", "optimize_h", or "bitflip"
 
-    n = 120
-    m = 100
+    nm_list = [(120, 100),(240,200)]
     p_list = [0.01, 0.02, 0.03, 0.04, 0.05]
     ci_target = 0.01
 
     # Load codes
-    codes = load_codes(n, m)
+    codes = load_codes(nm_list)
     if not codes:
-        logger.error("No codes found with n=%d, m=%d.", n, m)
+        logger.error("No codes found for nm_list=%s.", nm_list)
         sys.exit(1)
 
-    if mode == "sweep":
+    if mode == "bitflip":
+        # Bit-flip decoder: no h parameter
+        all_results = {}
+        for code in codes:
+            decoder = BitFlipDecoder(code)
+            result = run_experiment_bitflip(decoder, code, p_list, ci_target=ci_target)
+            all_results[code.id] = result
+
+        plot_bitflip_results(all_results)
+
+    elif mode == "sweep":
         # Sweep over all h values
         dv = codes[0].dv
         h_list = list(range(dv + 1))

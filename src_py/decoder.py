@@ -188,3 +188,65 @@ class VidermanDecoder(Decoder):
             return False
 
         return True
+
+
+class BitFlipDecoder(Decoder):
+    """
+    Bit-flipping decoder: iteratively flip the variable node with the most
+    unsatisfied check neighbors (must exceed dv/2) until no flippable node
+    remains.
+    """
+
+    label = "bitflip"
+
+    def decode(self, syndrome, max_iters=None):
+        """
+        Decode by iterative bit-flipping.
+
+        Args:
+            syndrome: np.array of length m, binary (0/1)
+            max_iters: maximum number of flip iterations (default: n)
+
+        Returns:
+            (e_deduced, converged) where e_deduced is np.array of length n
+            and converged is True if the syndrome was fully cleared.
+        """
+        if max_iters is None:
+            max_iters = self.n
+
+        synd = syndrome.copy()
+        e_deduced = np.zeros(self.n, dtype=int)
+
+        # Compute initial unsat_count[v] = number of neighbors c with synd[c] == 1
+        unsat_count = np.zeros(self.n, dtype=int)
+        for v in range(self.n):
+            for c in self.bit_nbhd[v]:
+                if synd[c] == 1:
+                    unsat_count[v] += 1
+
+        threshold = self.dv // 2 + 1  # strictly more than half
+
+        for _ in range(max_iters):
+            v = np.argmax(unsat_count)
+            if unsat_count[v] < threshold:
+                break
+
+            # Flip variable v
+            e_deduced[v] ^= 1
+
+            # Update syndrome and unsat_count for affected neighbors
+            for c in self.bit_nbhd[v]:
+                if synd[c] == 1:
+                    # This check becomes satisfied: decrement unsat_count for all its variables
+                    synd[c] = 0
+                    for u in self.check_nbhd[c]:
+                        unsat_count[u] -= 1
+                else:
+                    # This check becomes unsatisfied: increment unsat_count for all its variables
+                    synd[c] = 1
+                    for u in self.check_nbhd[c]:
+                        unsat_count[u] += 1
+
+        converged = not np.any(synd)
+        logger.debug("bitflip decode: converged=%s, flips=%d", converged, np.sum(e_deduced))
+        return e_deduced, converged

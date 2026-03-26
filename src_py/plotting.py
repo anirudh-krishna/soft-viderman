@@ -90,3 +90,57 @@ def plot_optimal_h(all_optimal_results):
     logger.info("Saved plot to %s", plot_path)
     plt.show()
     plt.close(fig)
+
+
+def plot_bitflip_results(all_results):
+    """
+    Plot decode failure rate and logical error rate vs p for the bit-flip decoder.
+    Two curves per code: one for decode failures, one for logical errors.
+
+    Args:
+        all_results: dict mapping code_id -> result data from run_experiment_bitflip
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    for code_id, data in all_results.items():
+        results = sorted(data["results"], key=lambda r: r["p"])
+        code_label = f"{code_id} (n={data['n']}, m={data['m']}, dv={data['dv']}, dc={data['dc']})"
+
+        ps = [r["p"] for r in results]
+
+        # Decode failure rate curve
+        decode_frs = [r["decode_failure_rate"] for r in results]
+        decode_cis = [wilson_ci(r["n_decode_failures"], r["n_samples"]) for r in results]
+        decode_lo = [max(fr - hw, 0.0) for fr, (_, hw) in zip(decode_frs, decode_cis)]
+        decode_hi = [fr + hw for fr, (_, hw) in zip(decode_frs, decode_cis)]
+        ax.errorbar(ps, decode_frs,
+                    yerr=[[fr - lo for fr, lo in zip(decode_frs, decode_lo)],
+                          [hi - fr for fr, hi in zip(decode_frs, decode_hi)]],
+                    marker="o", capsize=4, label=f"{code_label} decode fail")
+
+        # Logical error rate curve
+        logical_frs = [r["logical_error_rate"] for r in results]
+        logical_cis = [wilson_ci(r["n_logical_errors"], r["n_samples"]) for r in results]
+        logical_lo = [max(fr - hw, 0.0) for fr, (_, hw) in zip(logical_frs, logical_cis)]
+        logical_hi = [fr + hw for fr, (_, hw) in zip(logical_frs, logical_cis)]
+        ax.errorbar(ps, logical_frs,
+                    yerr=[[fr - lo for fr, lo in zip(logical_frs, logical_lo)],
+                          [hi - fr for fr, hi in zip(logical_frs, logical_hi)]],
+                    marker="s", capsize=4, linestyle="--", label=f"{code_label} logical err")
+
+    all_ps = [r["p"] for data in all_results.values() for r in data["results"]]
+    ax.set_xlabel("p (error probability)")
+    ax.set_ylabel("Rate")
+    ax.set_yscale("symlog", linthresh=1e-4)
+    ax.set_xlim(0, max(all_ps) * 1.05)
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize="small")
+    ax.set_title("Bit-Flip Decoding: Decode Failure & Logical Error Rate vs p")
+    ax.grid(True, which="both", alpha=0.3)
+
+    plot_path = os.path.join(OUTPUT_DIR, "bitflip_results.png")
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    logger.info("Saved plot to %s", plot_path)
+    plt.show()
+    plt.close(fig)
